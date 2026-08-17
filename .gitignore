@@ -32,7 +32,7 @@ chroma_data/
 # ── Jupyter ──
 .ipynb_checkpoints/
 
-# ── 测试 & 临时文件 ──
-test.py
-test_*.py
-*.log
+# # ── 测试 & 临时文件 ──
+# test.py
+# test_*.py
+# *.log
