@@ -8,21 +8,18 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.core.config import settings
 from app.main import app
 
-# 所有测试用户统一以该前缀开头，便于最后统一清理
-TEST_USER_PREFIX = "test"
+TEST_PREFIX = "test"
 
 
-async def _delete_test_users() -> None:
-    """删除所有测试用户（username 以 test 开头）"""
+async def _delete_test_data() -> None:
+    """删除所有测试数据"""
     engine = create_async_engine(settings.DATABASE_URL)
     try:
         async with engine.begin() as conn:
-            await conn.execute(
-                text(f"DELETE FROM users WHERE username LIKE '{TEST_USER_PREFIX}%'")
-            )
+            # 只需删用户，其他自动级联
+            await conn.execute(text("DELETE FROM users WHERE username LIKE 'test%'"))
     finally:
         await engine.dispose()
-
 
 @pytest.fixture(scope="session")
 def client():
@@ -46,11 +43,11 @@ def _reset_cookies(client):
 def _cleanup_after_test():
     """每个测试后清理测试用户，保证数据隔离"""
     yield
-    asyncio.run(_delete_test_users())
+    asyncio.run(_delete_test_data())
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _final_cleanup():
-    """会话结束时兜底清理所有测试用户（即使个别测试异常也保证不残留）"""
+    """会话结束时兜底清理所有测试（即使个别测试异常也保证不残留）"""
     yield
-    asyncio.run(_delete_test_users())
+    asyncio.run(_delete_test_data())

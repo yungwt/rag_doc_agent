@@ -139,7 +139,7 @@ def test_refresh_with_access_token_fails(client):
     _, username, _ = _register(client)
     login_resp = _login(client, username)
     access_token = login_resp.cookies.get("access_token")
-    
+    client.cookies.clear()
     # 手动构造请求，用 access_token 当 refresh_token
     resp = client.post("/api/auth/refresh", json={"refresh_token": access_token})
     assert resp.status_code == 401
