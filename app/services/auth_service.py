@@ -30,8 +30,8 @@ async def register(db: AsyncSession, username: str, email: str | None, password:
     return user
 
 
-async def login(db: AsyncSession, username: str, password: str) -> dict:
-    """登录成功返回 access_token 和 refresh_token"""
+async def login(db: AsyncSession, username: str, password: str) -> tuple[User, str, str]:
+    """登录成功返回 (用户, access_token, refresh_token)"""
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
 
@@ -41,8 +41,4 @@ async def login(db: AsyncSession, username: str, password: str) -> dict:
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已被禁用")
 
-    return {
-        "access_token": create_access_token(user.id),
-        "refresh_token": create_refresh_token(user.id),
-        "token_type": "bearer",
-    }
+    return user, create_access_token(user.id), create_refresh_token(user.id)

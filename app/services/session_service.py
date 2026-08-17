@@ -52,7 +52,6 @@ async def delete_session(db: AsyncSession, session_id: int, user_id: int):
     await db.delete(session)
     await db.flush()
 
-
 async def save_message(
     db: AsyncSession, session_id: int, role: str, content: str, sources: list | None = None
 ) -> Message:

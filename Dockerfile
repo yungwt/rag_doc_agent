@@ -13,6 +13,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# 替换为国内镜像源（Debian 12 使用 bookworm，不是 trixie）
+RUN sed -i 's/deb.debian.org/mirrors.163.com/g' /etc/apt/sources.list.d/debian.sources \
+    && sed -i 's/security.debian.org/mirrors.163.com/g' /etc/apt/sources.list.d/debian.sources
+
 # ca-certificates：下载云端模型/依赖时需要
 # 添加 gcc 和 python3-dev 以支持编译 python-bcrypt
 RUN apt-get update \

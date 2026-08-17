@@ -12,7 +12,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     ports:
-      - "3306:3306"
+      - "3306:3307"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -46,13 +46,11 @@ services:
       # 容器内服务名是 mysql / redis，覆盖 .env 里的 localhost
       MYSQL_HOST: mysql
       REDIS_URL: redis://redis:6379/0
-      # 代码在容器内路径是 /app/app/...，这里显式指定与挂载卷一致
-      CHROMA_PERSIST_DIR: /app/app/chroma_data
     ports:
       - "8000:8000"
     volumes:
-      - uploads_data:/app/app/uploads
-      - chroma_data:/app/app/chroma_data
+      - uploads_data:/app/uploads
+      - chroma_data:/app/chroma_data
     depends_on:
       mysql:
         condition: service_healthy

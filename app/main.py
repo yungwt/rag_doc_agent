@@ -24,14 +24,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# # CORS 跨域
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=settings.CORS_ORIGINS,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
+# CORS 跨域（Cookie 认证需要 allow_credentials=True，且 origin 不能是 *）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth.router)
 app.include_router(documents.router)

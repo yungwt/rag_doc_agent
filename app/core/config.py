@@ -2,7 +2,7 @@ import os
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from pathlib import Path
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent  # 项目根目录
 load_dotenv(BASE_DIR / ".env")
 
 
@@ -33,6 +33,12 @@ class Settings:
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 7))
 
+    # ── Cookie（JWT 存储方式）──
+    COOKIE_ACCESS_NAME: str = os.getenv("COOKIE_ACCESS_NAME", "access_token")
+    COOKIE_REFRESH_NAME: str = os.getenv("COOKIE_REFRESH_NAME", "refresh_token")
+    COOKIE_SECURE: bool = os.getenv("COOKIE_SECURE", "false").lower() in ("true", "1", "yes")
+    COOKIE_SAMESITE: str = os.getenv("COOKIE_SAMESITE", "lax")
+
     # ── LLM ──
     LLM_MODEL: str = os.getenv("LLM_MODEL")
     LLM_API_KEY: str = os.getenv("LLM_API_KEY")
@@ -46,7 +52,7 @@ class Settings:
     # ── 向量库 ──
     CHROMA_PERSIST_DIR: Path = Path(os.getenv("CHROMA_PERSIST_DIR", "chroma_data"))
     if not CHROMA_PERSIST_DIR.is_absolute():
-        CHROMA_PERSIST_DIR = Path(__file__).resolve().parent.parent / CHROMA_PERSIST_DIR
+        CHROMA_PERSIST_DIR = BASE_DIR / CHROMA_PERSIST_DIR
 
     # ── 文档处理 ──
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", 20))
@@ -57,7 +63,12 @@ class Settings:
     SESSION_HISTORY_LIMIT: int = int(os.getenv("SESSION_HISTORY_LIMIT", 10))
     
     # ── CORS (部署时改) ──
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:8000",      # FastAPI 文档页面
+        "http://127.0.0.1:8000",
+        "http://localhost:3000", 
+        "http://localhost:5173"
+    ]
 
 
 settings = Settings()
