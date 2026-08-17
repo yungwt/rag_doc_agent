@@ -1,4 +1,5 @@
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -12,7 +13,17 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # ── 数据库 ──
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql+aiomysql://用户名:密码@主机地址:端口/数据库名")
+    MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
+    MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
+    MYSQL_USER: str = os.getenv("MYSQL_USER", "rag_user")
+    MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "")
+    MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "rag_doc_agent")
+
+    # 由组件变量拼接，避免手写完整 URL 时 host 写错（本地 localhost / 容器 mysql）
+    DATABASE_URL: str = (
+        f"mysql+aiomysql://{quote_plus(MYSQL_USER)}:{quote_plus(MYSQL_PASSWORD)}"
+        f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+    )
 
     # ── Redis ──
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -31,9 +42,6 @@ class Settings:
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL")
     EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY"))
     EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", os.getenv("LLM_BASE_URL"))
-
-    # ── reranker 模型 ──
-    RERANKER_MODEL_PATH: str = os.getenv("RERANKER_MODEL_PATH")
 
     # ── 向量库 ──
     CHROMA_PERSIST_DIR: Path = Path(os.getenv("CHROMA_PERSIST_DIR", "chroma_data"))

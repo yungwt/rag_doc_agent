@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import async_session
 from app.core.config import settings
-from app.core.model_factory import embeddings, llm, reranker
+from app.core.model_factory import embeddings, llm
 from app.models.document import Document, DocStatus
 from app.models.chunk import DocumentChunk
 from app.services.session_service import get_history as get_session_history
@@ -112,19 +112,6 @@ async def retrieve_chunks(user_id: int, question: str, k: int = 10) -> list[dict
         for doc in docs
     ]
 
-async def rerank_chunks(question: str, chunks: list[dict], top_k: int = 3) -> list[dict]:
-    """用 FlagReranker 对检索结果重排序，返回 Top-K"""
-    if len(chunks) <= top_k:
-        return chunks
-
-    pairs = [[question, chunk["content"]] for chunk in chunks]
-    scores = reranker.compute_score(pairs)
-
-    scored = list(zip(scores, chunks))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [chunk for _, chunk in scored[:top_k]]
-
-
 async def generate_answer(question: str, chunks: list[dict], history: list[dict] = None) -> str:
 
     if not chunks:
@@ -204,11 +191,7 @@ async def ask_question(db: AsyncSession, user_id: int, question: str, session_id
         ]
     else:
         history = ["无历史对话"]
-    if reranker is not None:
-        chunks = await retrieve_chunks(user_id, question)
-        chunks = await rerank_chunks(question, chunks)
-    else:
-        chunks = await retrieve_chunks(user_id, question, k=3)
+    chunks = await retrieve_chunks(user_id, question, k=3)
     answer = await generate_answer(question, chunks, history)
     sources = await enrich_sources(db, user_id, chunks)
 
