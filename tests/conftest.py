@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import Mock, patch, AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +10,27 @@ from app.core.config import settings
 from app.main import app
 
 TEST_PREFIX = "test"
+
+
+
+@pytest.fixture()
+def mock_embeddings_only():
+    """
+    只 Mock embeddings（向量模型）
+    文档操作只需要向量化功能
+    """
+    
+    # Mock embeddings
+    mock_embeddings = Mock()
+    # embed_documents 接受文本列表，返回向量列表
+    mock_embeddings.embed_documents.return_value = [
+        [0.1] * 384 for _ in range(10)  # 假设维度384
+    ]
+    mock_embeddings.embed_query.return_value = [0.1] * 384
+    
+    # 只 patch embeddings
+    with patch('app.services.rag_service.embeddings', mock_embeddings):
+        yield mock_embeddings  # 返回 mock 对象，方便验证
 
 
 async def _delete_test_data() -> None:

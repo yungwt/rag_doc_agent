@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -74,14 +75,11 @@ async def process_document(doc_id: int, file_path: Path):
                     content=chunk_text,
                     vector_id=chunk_ids[i],
                 ))
-
             doc.status = DocStatus.COMPLETED
             doc.chunk_count = len(chunks)
             await db.flush()
             await db.commit()
-
     except Exception as e:
-        print(f"❌ 文档处理失败 doc_id={doc_id}: {e}")  # ← 加这行
         import traceback
         traceback.print_exc()            
         async with async_session() as db:

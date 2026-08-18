@@ -1,9 +1,11 @@
 import asyncio
+import os
 import uuid
 from pathlib import Path
 import hashlib
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.rag_service import process_document
 from app.core.config import settings,BASE_DIR
@@ -47,7 +49,6 @@ async def upload_document(db: AsyncSession, user_id: int, file: UploadFile) -> D
         )
 
     # 生成唯一文件名，防止覆盖
-    ext = Path(file.filename).suffix if file.filename else ""
     saved_name = f"{uuid.uuid4().hex}{ext}"
     file_path = UPLOAD_DIR / saved_name
 
@@ -65,13 +66,37 @@ async def upload_document(db: AsyncSession, user_id: int, file: UploadFile) -> D
         file_size=len(contents),
         status=DocStatus.UPLOADING,
         file_hash=file_hash,
+        file_path=file_path
     )
     db.add(doc)
-    await db.flush()
-    await db.refresh(doc)
-    asyncio.create_task(process_document(doc.id, file_path))
-    return doc
-
+    try:
+        await db.flush()
+        await db.refresh(doc)
+        await db.commit()
+        
+        asyncio.create_task(process_document(doc.id, file_path))
+        return doc
+        
+    except IntegrityError as e:
+        # ✅ 唯一约束冲突：文件已存在
+        await db.rollback()
+        # 删除已保存的文件
+        if file_path.exists():
+            file_path.unlink()
+        raise HTTPException(
+            status_code=409,
+            detail="文件已存在，请勿重复上传"
+        )
+        
+    except Exception as e:
+        # ✅ 其他异常：服务器错误
+        await db.rollback()
+        if file_path.exists():
+            file_path.unlink()
+        raise HTTPException(
+            status_code=500,
+            detail=f"文档保存失败: {str(e)}"
+        )
 
 async def list_documents(
     db: AsyncSession,
@@ -97,3 +122,24 @@ async def list_documents(
     documents = result.scalars().all()
 
     return list(documents), total
+
+async def delete_document(db: AsyncSession, document_id: int, user_id: int) -> None:
+    """删除文档（仅所有者可删除）"""
+    # 查询文档
+    result = await db.execute(
+        select(Document).where(Document.id == document_id)
+    )
+    doc = result.scalar_one_or_none()
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    
+    if doc.user_id != user_id:
+        raise HTTPException(status_code=403, detail="无权删除此文档")
+    
+    # 删除物理文件
+    if doc.file_path:
+        os.remove(doc.file_path)
+    
+    # 删除数据库记录
+    await db.delete(doc)

@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
@@ -24,10 +25,20 @@ async def register(db: AsyncSession, username: str, email: str | None, password:
         email=email,
         hashed_password=hash_password(password),
     )
-    db.add(user)
-    await db.flush()
-    await db.refresh(user)
-    return user
+    try:
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+        await db.commit()
+        return user
+    except IntegrityError as e:
+        await db.rollback()
+        if "username" in str(e):
+            raise HTTPException(409, "用户名已存在")
+        if "email" in str(e):
+            raise HTTPException(409, "邮箱已存在")
+        raise HTTPException(500, "注册失败")
+
 
 
 async def login(db: AsyncSession, username: str, password: str) -> tuple[User, str, str]:

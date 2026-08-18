@@ -29,3 +29,12 @@ async def list_documents(
 ):
     docs, total = await doc_service.list_documents(db, current_user.id, skip, limit)
     return DocumentListResponse(documents=docs, total=total)
+
+# app/api/documents.py
+@router.delete("/{document_id}", status_code=204)
+async def delete_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await doc_service.delete_document(db, document_id, current_user.id)
