@@ -1,16 +1,16 @@
 import asyncio
 from unittest.mock import Mock, patch, AsyncMock
-
+import shutil
+from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
-
-from app.core.config import settings
+import chromadb
+from app.core.config import settings,BASE_DIR
 from app.main import app
 
 TEST_PREFIX = "test"
-
 
 
 @pytest.fixture()
@@ -35,6 +35,7 @@ def mock_embeddings_only():
 
 async def _delete_test_data() -> None:
     """删除所有测试数据"""
+    # 1. 删除数据库数据
     engine = create_async_engine(settings.DATABASE_URL)
     try:
         async with engine.begin() as conn:
@@ -42,6 +43,25 @@ async def _delete_test_data() -> None:
             await conn.execute(text("DELETE FROM users WHERE username LIKE 'test%'"))
     finally:
         await engine.dispose()
+
+     # 2. 删除测试上传的文件
+    upload_dir = Path(BASE_DIR / "uploads")
+    if upload_dir.exists():
+        for file in upload_dir.iterdir():
+            if file.is_file():
+                file.unlink()
+    
+    # 3. 删除测试 Chroma 数据（物理删除整个向量库文件夹）
+    # 删文件前先清空 chromadb 进程级缓存的连接，否则缓存的连接仍指向
+    # 已删除的 sqlite 文件，后续写入会报 "attempt to write a readonly database"。
+    chroma_dir = Path(settings.CHROMA_PERSIST_DIR)
+    try:
+        chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
+        chroma_client.clear_system_cache()
+    except Exception as e:
+        print(f"⚠️ Chroma 客户端缓存清理失败: {e}")
+    if chroma_dir.exists():
+        shutil.rmtree(chroma_dir)
 
 @pytest.fixture(scope="session")
 def client():

@@ -209,6 +209,44 @@ def test_delete_document_success(client):
 
 
 @pytest.mark.document
+def test_delete_document_removes_vectors(client):
+    """删除文档时应同时删除向量库中对应的向量"""
+    import time
+    import chromadb
+    from app.core.config import settings
+
+    reg_resp, username, _ = _register(client)
+    user_id = reg_resp.json()["id"]
+    _login(client, username)
+
+    upload_resp = _upload_doc(client, content=b"vector cleanup test content")
+    assert upload_resp.status_code == 201
+    doc_id = upload_resp.json()["id"]
+
+    # 等待文档向量化完成
+    for _ in range(100):
+        docs = client.get("/api/documents/").json()["documents"]
+        target = next((d for d in docs if d["id"] == doc_id), None)
+        if target and target["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+    assert target["status"] == "completed", f"文档处理失败: {target['status']}"
+
+    # 删除前：向量库中存在该文档的向量
+    chroma_client = chromadb.PersistentClient(path=str(settings.CHROMA_PERSIST_DIR))
+    collection = chroma_client.get_collection(f"user_{user_id}")
+    assert len(collection.get(where={"document_id": str(doc_id)})["ids"]) > 0
+
+    # 删除文档
+    del_resp = client.delete(f"/api/documents/{doc_id}")
+    assert del_resp.status_code == 204
+
+    # 删除后：向量库中该文档的向量已被删除
+    collection = chroma_client.get_collection(f"user_{user_id}")
+    assert len(collection.get(where={"document_id": str(doc_id)})["ids"]) == 0
+
+
+@pytest.mark.document
 def test_delete_document_not_found(client):
     """删除不存在的文档"""
     _, username, _ = _register(client)

@@ -110,6 +110,22 @@ async def retrieve_chunks(user_id: int, question: str, k: int = 10) -> list[dict
         for doc in docs
     ]
 
+def delete_document_vectors(user_id: int, doc_id: int) -> None:
+    """从 Chroma 删除某文档对应的所有向量。
+
+    按元数据 ``document_id`` 过滤删除；集合不存在或删除失败时静默跳过，
+    保证不阻塞文档本身的删除流程。
+    """
+    try:
+        vector_store = Chroma(
+            collection_name=f"user_{user_id}",
+            embedding_function=embeddings,
+            persist_directory=str(settings.CHROMA_PERSIST_DIR),
+        )
+        vector_store.delete(where={"document_id": str(doc_id)})
+    except Exception as e:
+        logging.warning(f"删除文档 {doc_id} 的向量失败: {e}")
+
 async def generate_answer(question: str, chunks: list[dict], history: list[dict] = None) -> str:
 
     if not chunks:

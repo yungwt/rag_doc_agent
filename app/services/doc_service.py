@@ -7,7 +7,7 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.rag_service import process_document
+from app.services.rag_service import process_document, delete_document_vectors
 from app.core.config import settings,BASE_DIR
 from app.models.document import Document, DocStatus
 
@@ -140,6 +140,9 @@ async def delete_document(db: AsyncSession, document_id: int, user_id: int) -> N
     # 删除物理文件
     if doc.file_path:
         os.remove(doc.file_path)
-    
+
+    # 删除向量库中对应的向量
+    delete_document_vectors(user_id, doc.id)
+
     # 删除数据库记录
     await db.delete(doc)

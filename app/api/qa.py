@@ -17,6 +17,9 @@ async def ask(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # 校验 session 存在且属于当前用户（隐藏其他用户的会话存在性）
+    await session_service.get_session(db, payload.session_id, current_user.id)
+
     # 如果是第一条消息，用问题内容更新会话标题
     count_result = await db.execute(
         select(func.count()).select_from(Message).where(Message.session_id == payload.session_id)
