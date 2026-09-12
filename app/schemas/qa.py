@@ -1,8 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QuestionRequest(BaseModel):
-    question: str
+    question: str = Field(max_length=2000)
     session_id: int
 
 

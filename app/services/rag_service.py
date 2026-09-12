@@ -14,6 +14,10 @@ from app.models.chunk import DocumentChunk
 from app.services.session_service import get_history as get_session_history
 
 # ─── 文本提取 ────────────────────────────────────────────
+# 中文 .txt 大量是 GBK/GB2312 编码，gb18030 是它们的超集，放最后兜底
+TEXT_ENCODINGS = ("utf-8", "gb18030")
+
+
 def load_text(file_path: Path) -> str:
     suffix = file_path.suffix.lower()
 
@@ -23,9 +27,14 @@ def load_text(file_path: Path) -> str:
         return "\n".join(p.page_content for p in pages)
 
     elif suffix in (".txt", ".md"):
-        loader = TextLoader(str(file_path), encoding="utf-8")
-        docs = loader.load()
-        return "\n".join(d.page_content for d in docs)
+        # TextLoader 解码失败时会抛 RuntimeError（原始 UnicodeDecodeError 挂在 __cause__）
+        for encoding in TEXT_ENCODINGS:
+            try:
+                docs = TextLoader(str(file_path), encoding=encoding).load()
+                return "\n".join(d.page_content for d in docs)
+            except (UnicodeDecodeError, RuntimeError):
+                continue
+        raise ValueError("文本编码无法识别（已尝试 UTF-8 / GBK），请另存为 UTF-8 后重新上传")
 
     else:
         raise ValueError(f"不支持的文件类型: {suffix}")
@@ -86,12 +95,16 @@ async def process_document(doc_id: int, file_path: Path):
             doc = await db.get(Document, doc_id)
             if doc:
                 doc.status = DocStatus.FAILED
+                # 落库失败原因：只打日志的话前端永远只看到一个"失败"标签
+                doc.error_message = f"{type(e).__name__}: {e}"[:500]
+                # 释放 hash 槽位：失败记录不该挡住用户重传同一文件
+                doc.file_hash = None
                 await db.flush()
                 await db.commit()
 
 async def retrieve_chunks(user_id: int, question: str, k: int = 10) -> list[dict]:
     """
-    纯检索：返回最相关的 k 个片段
+    纯检索：返回最相关的 k 个片段（相似度低于 RELEVANCE_MIN_SCORE 的丢弃）
     返回格式: [{"content": "...", "document_id": "1", "chunk_index": 0}, ...]
     """
     vector_store = Chroma(
@@ -99,16 +112,22 @@ async def retrieve_chunks(user_id: int, question: str, k: int = 10) -> list[dict
         embedding_function=embeddings,
         persist_directory=str(settings.CHROMA_PERSIST_DIR),
     )
-    docs = vector_store.similarity_search(question, k=k)
+    pairs = vector_store.similarity_search_with_score(question, k=k)
 
-    return [
-        {
-            "content": doc.page_content,
-            "document_id": doc.metadata.get("document_id", ""),
-            "chunk_index": doc.metadata.get("chunk_index", 0),
-        }
-        for doc in docs
-    ]
+    results = []
+    for doc, dist in pairs:
+        # l2 距离换算余弦相似度：归一化向量满足 d² = 2 - 2·cosθ → cos = 1 - d²/2
+        relevance = max(0.0, 1.0 - dist * dist / 2)
+        if relevance < settings.RELEVANCE_MIN_SCORE:
+            continue
+        results.append(
+            {
+                "content": doc.page_content,
+                "document_id": doc.metadata.get("document_id", ""),
+                "chunk_index": doc.metadata.get("chunk_index", 0),
+            }
+        )
+    return results
 
 def delete_document_vectors(user_id: int, doc_id: int) -> None:
     """从 Chroma 删除某文档对应的所有向量。
@@ -129,24 +148,28 @@ def delete_document_vectors(user_id: int, doc_id: int) -> None:
 async def generate_answer(question: str, chunks: list[dict], history: list[dict] = None) -> str:
 
     if not chunks:
-        context = "无一张信息"
+        context = "（暂无相关文档片段）"
     else:
         # 拼接上下文
         context = "\n\n".join(
             f"[来源{i+1}]\n{chunk['content']}" for i, chunk in enumerate(chunks)
         )
     system_prompt = SystemMessagePromptTemplate.from_template(
-        """你是一个基于对话历史和已知信息回答问题的助手。
-            如果答案在历史对话中已明确，直接使用历史信息回答。
-            如果历史中无答案，再根据已知信息回答。
-            如果都没有，说"根据已知信息无法回答"。
-            保持答案简洁准确。"""
+        """你是一个中文助手，请严格按以下顺序处理用户的问题：
+
+            第一步，判断问题与「对话历史」「检索信息」是否相关。
+            第二步，如果两者都与问题不相关（例如寒暄、闲聊、常识性提问），直接用你自己的知识正常回答。
+            第三步，如果相关，优先采用「对话历史」中的信息；历史中没有答案时，再采用「检索信息」。
+            只有当问题确实需要依据资料、而「对话历史」和「检索信息」里都找不到依据时，
+            才回答"根据已知信息无法回答"。
+
+            保持答案简洁准确，不要编造资料中没有的内容。"""
         )
     human_prompt = HumanMessagePromptTemplate.from_template(
         """对话历史：
             {history}
 
-            已知信息：
+            检索信息：
             {context}
 
             问题：{question}
@@ -193,15 +216,19 @@ async def enrich_sources(db: AsyncSession, user_id: int, chunks: list[dict]) -> 
     return sources
 
 
-async def ask_question(db: AsyncSession, user_id: int, question: str, session_id: int = None) -> dict:
+async def ask_question(db: AsyncSession, user_id: int, question: str, session_id: int = None, history_limit: int | None = None) -> dict:
     """
     组合：检索 → 生成 → 整理来源
+    history_limit: 用户级记忆长度，未设置时跟随全局默认
     """
     if session_id:
-        history = await get_session_history(db, session_id, limit=settings.SESSION_HISTORY_LIMIT)
+        history_msgs = await get_session_history(db, session_id, limit=history_limit or settings.SESSION_HISTORY_LIMIT)
+        # 最后一条就是刚存的当前问题（已在下方单独作为 {question} 传入），剔除避免重复
+        if history_msgs and history_msgs[-1].role == "user" and history_msgs[-1].content == question:
+            history_msgs = history_msgs[:-1]
         history = [
             f"{'用户' if msg.role == 'user' else '助手'}: {msg.content[:200]}"
-            for msg in history
+            for msg in history_msgs
         ]
     else:
         history = ["无历史对话"]

@@ -4,8 +4,11 @@ import uuid
 
 import pytest
 
-# 注意：qa 是整个项目的最后一步，这里不再 mock 嵌入 / LLM 的响应，
-# 而是真实走通 注册→登录→上传→向量化→建会话→提问→检索→生成 的完整链路。
+# 注意：qa 是整个项目的最后一步。分两类用例：
+#   1. @pytest.mark.llm —— 真实走通完整链路并验证模型输出（消耗 API 额度，
+#      默认被 pytest.ini 的 -m "not llm" 跳过，用 python test.py -m llm 运行）
+#   2. mock 链路用例 —— Mock 掉 LLM/Embeddings，只验证链路本身（消息落库、
+#      来源返回、失败回滚、prompt 组装等），零 API 消耗，默认全跑
 
 
 # ========== 辅助函数（复用） ==========
@@ -75,6 +78,7 @@ def _setup_full_flow(client, content: bytes, filename: str = "test.txt") -> tupl
 # ========== 完整流程测试 ==========
 
 @pytest.mark.qa
+@pytest.mark.llm
 def test_qa_full_flow(client):
     """完整链路：注册→上传→处理→建会话→提问→检索生成→验证答案/来源/消息/标题"""
     content = (
@@ -114,6 +118,7 @@ def test_qa_full_flow(client):
 
 
 @pytest.mark.qa
+@pytest.mark.llm
 def test_qa_multi_turn_conversation(client):
     """多轮对话：历史被保留，标题仅在首条消息时更新"""
     content = (
@@ -145,6 +150,7 @@ def test_qa_multi_turn_conversation(client):
 
 
 @pytest.mark.qa
+@pytest.mark.llm
 def test_qa_ask_without_documents(client):
     """未上传文档时提问：仍有回答，但来源为空"""
     _, username, _ = _register(client)
@@ -161,6 +167,7 @@ def test_qa_ask_without_documents(client):
 
 
 @pytest.mark.qa
+@pytest.mark.llm
 def test_qa_session_title_truncated(client):
     """超长问题：会话标题截取前 50 字"""
     _, username, _ = _register(client)
@@ -201,6 +208,7 @@ def test_qa_invalid_payload(client):
 # ========== 安全漏洞测试（当前会失败，用于暴露问题） ==========
 
 @pytest.mark.qa
+@pytest.mark.llm
 def test_qa_cross_user_session_access(client):
     """
     跨用户会话访问 
@@ -254,3 +262,120 @@ def test_qa_session_not_exists(client):
     
     assert resp.status_code == 404, \
         f"不存在的会话应该返回404，实际返回 {resp.status_code}"
+
+
+# ========== Mock 链路测试（零 API 消耗，验证链路本身而非模型输出） ==========
+
+MOCK_ANSWER = "【模拟回答】这是测试环境的固定回复。"
+
+
+@pytest.mark.qa
+def test_qa_mock_full_pipeline(client, mock_models):
+    """Mock 模型验证完整链路：上传→向量化→建会话→提问→消息落库→来源返回"""
+    content = "机器学习是人工智能的一个分支。\n深度学习依赖多层神经网络。\n".encode()
+
+    session_id, doc = _setup_full_flow(client, content)
+    assert doc["status"] == "completed" and doc["chunk_count"] > 0
+
+    resp = client.post("/api/qa/", json={"question": "什么是机器学习？", "session_id": session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # 答案来自 mock LLM → 说明 检索→prompt组装→LLM调用→响应 整条链路打通
+    assert data["answer"] == MOCK_ANSWER
+    # mock 向量全一致（相关性 1.0）→ 全部通过阈值，来源非空且字段完整
+    assert len(data["sources"]) > 0
+    for key in ("document_id", "title", "chunk_index", "content"):
+        assert key in data["sources"][0]
+
+    # 用户消息 + 助手消息已持久化，首问已覆盖标题
+    msgs_resp = client.get(f"/api/sessions/{session_id}/messages?limit=1")
+    # total 是会话消息总数（不受 limit 影响），limit=1 也应报 2 —— 回归：total 曾谎报为 len(messages)
+    assert msgs_resp.json()["total"] == 2
+    assert len(msgs_resp.json()["messages"]) == 1
+    msgs = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
+    assert len(msgs) == 2
+    assert {m["role"] for m in msgs} == {"user", "assistant"}
+
+
+@pytest.mark.qa
+def test_qa_mock_ask_without_documents(client, mock_models):
+    """Mock 模型：未上传文档时提问，回答正常、来源为空"""
+    _, username, _ = _register(client)
+    _login(client, username)
+    session_id = client.post("/api/sessions/", json={"title": "新对话"}).json()["id"]
+
+    resp = client.post("/api/qa/", json={"question": "今天天气怎么样？", "session_id": session_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["answer"] == MOCK_ANSWER
+    assert data["sources"] == []
+
+
+@pytest.mark.qa
+def test_qa_mock_failure_rolls_back_user_message(client, mock_embeddings_only):
+    """生成失败（模型侧错误）返回 503，且刚落的用户消息被回滚——重试不会产生重复提问"""
+    import httpx
+    from unittest.mock import patch
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from openai import APIError
+
+    class _ExplodingLLM(FakeListChatModel):
+        def __init__(self):
+            super().__init__(responses=["不应被用到"])
+
+        def _call(self, messages, stop=None, run_manager=None, **kwargs):
+            raise APIError("模拟模型服务故障",
+                           request=httpx.Request("POST", "http://mock"), body=None)
+
+    session_id, _ = _setup_full_flow(client, "测试内容".encode())
+
+    with patch("app.services.rag_service.llm", _ExplodingLLM()):
+        resp = client.post("/api/qa/", json={"question": "会失败的问题", "session_id": session_id})
+    assert resp.status_code == 503
+    assert "模型服务" in resp.json()["detail"]
+
+    # 失败后用户消息已回滚，历史里不会留下半截提问
+    msgs = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
+    assert len(msgs) == 0, f"失败后应回滚用户消息，实际残留 {len(msgs)} 条"
+
+
+@pytest.mark.qa
+def test_qa_mock_history_excludes_current_question(client, mock_embeddings_only, mock_llm):
+    """组装历史时剔除刚存的当前问题（回归：发给 LLM 的历史不含刚问的这句话本身）"""
+    session_id, _ = _setup_full_flow(client, "知识内容".encode())
+
+    q1 = "第一个问题是什么？"
+    q2 = "第二个问题是什么？"
+    assert client.post("/api/qa/", json={"question": q1, "session_id": session_id}).status_code == 200
+    assert client.post("/api/qa/", json={"question": q2, "session_id": session_id}).status_code == 200
+
+    # 第二次调用收到的 prompt：当前问题只出现 1 次（问题行），历史里没有重复
+    prompt_text = "\n".join(str(m.content) for m in mock_llm.prompts_seen[-1])
+    assert prompt_text.count(q2) == 1, "当前问题在 prompt 中出现多次（历史未剔除）"
+    assert q1 in prompt_text, "上一轮对话历史丢失"
+
+
+@pytest.mark.qa
+def test_retrieve_chunks_threshold_filter(monkeypatch):
+    """低于 RELEVANCE_MIN_SCORE 的切片被丢弃（l2 距离按 cos = 1 - d²/2 换算）"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.services import rag_service
+
+    def make_doc(i):
+        return SimpleNamespace(
+            page_content=f"chunk{i}",
+            metadata={"document_id": "1", "chunk_index": i},
+        )
+
+    class FakeStore:
+        def similarity_search_with_score(self, question, k):
+            # d=0.6 → cos≈0.82 保留；d=1.4 → cos≈0.02 丢弃；d=1.0 → cos=0.5 保留
+            return [(make_doc(0), 0.6), (make_doc(1), 1.4), (make_doc(2), 1.0)]
+
+    monkeypatch.setattr(rag_service, "Chroma", lambda **kwargs: FakeStore())
+    chunks = asyncio.run(rag_service.retrieve_chunks(1, "任意问题", k=3))
+
+    assert [c["chunk_index"] for c in chunks] == [0, 2]

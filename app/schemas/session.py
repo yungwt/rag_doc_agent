@@ -1,9 +1,9 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SessionCreate(BaseModel):
-    title: str = "新对话"
+    title: str = Field(default="新对话", max_length=200)
 
 
 class SessionResponse(BaseModel):

@@ -86,6 +86,13 @@ async def refresh(
     user = await db.get(User, int(user_id))
     if not user:
         raise HTTPException(status_code=401, detail="用户不存在")
+    if not user.is_active:
+        # 401 而非 403：语义是"凭据不再有效"，前端据此跳登录页并展示原因
+        raise HTTPException(status_code=401, detail="账号已被禁用")
+
+    # 轮换：旧刷新令牌立即进黑名单，防止被偷走之后重复使用
+    now = int(datetime.now(timezone.utc).timestamp())
+    await blacklist_token(token, max(payload["exp"] - now, 1))
 
     set_auth_cookies(response, create_access_token(user.id), create_refresh_token(user.id))
     return {"msg": "已刷新"}

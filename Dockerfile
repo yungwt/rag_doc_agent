@@ -1,6 +1,18 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim
+# ── Stage 1: 构建前端 ──────────────────────────────────────
+FROM node:20-alpine AS frontend-build
+WORKDIR /app
+# 先只拷依赖清单，命中 npm ci 的缓存（依赖不变就不重装 node_modules）
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+WORKDIR /app/frontend
+RUN npm ci
+# 再拷源码（vite 需要 index.html / src/ 才能 build）
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: 后端运行时 ────────────────────────────────────
+FROM python:3.11-bookworm
 
 # 引入 uv 二进制（官方推荐做法）
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -9,6 +21,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/usr/local \
+    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
@@ -32,6 +45,9 @@ RUN uv sync --frozen --no-dev
 
 # 项目代码
 COPY app ./app
+
+# 前端构建产物（Stage 1），由 main.py 以 StaticFiles 挂载到 /
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 EXPOSE 8000
 

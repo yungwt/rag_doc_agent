@@ -24,10 +24,14 @@ async def upload_document(
 async def list_documents(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    status: str | None = Query(None, pattern="^(all|uploading|processing|completed|failed)$"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    docs, total = await doc_service.list_documents(db, current_user.id, skip, limit)
+    docs, total = await doc_service.list_documents(
+        db, current_user.id, skip, limit,
+        status=None if status in (None, "all") else status,
+    )
     return DocumentListResponse(documents=docs, total=total)
 
 # app/api/documents.py

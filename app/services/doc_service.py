@@ -8,14 +8,18 @@ from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.rag_service import process_document, delete_document_vectors
-from app.core.config import settings,BASE_DIR
+from app.core.config import settings
 from app.models.document import Document, DocStatus
 
 
-UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = settings.UPLOAD_DIR
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # 允许的文件类型
 ALLOWED_TYPES = {".pdf", ".txt", ".md"}
+
+# 持有后台解析任务的强引用：事件循环只保留弱引用，
+# 不持有的话任务可能在长解析中途被 GC 回收，文档永远卡在"处理中"
+_background_tasks: set = set()
 
 async def upload_document(db: AsyncSession, user_id: int, file: UploadFile) -> Document:
     """保存文件，创建文档记录，状态为 uploading"""
@@ -34,6 +38,7 @@ async def upload_document(db: AsyncSession, user_id: int, file: UploadFile) -> D
         select(Document).where(
             Document.user_id == user_id,
             Document.file_hash == file_hash,
+            Document.status != DocStatus.FAILED,  # 失败记录不占坑，允许重传同一文件
         )
     )
     existing = result.scalar_one_or_none()
@@ -74,7 +79,9 @@ async def upload_document(db: AsyncSession, user_id: int, file: UploadFile) -> D
         await db.refresh(doc)
         await db.commit()
         
-        asyncio.create_task(process_document(doc.id, file_path))
+        task = asyncio.create_task(process_document(doc.id, file_path))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         return doc
         
     except IntegrityError as e:
@@ -103,19 +110,27 @@ async def list_documents(
     user_id: int,
     skip: int = 0,
     limit: int = 20,
+    status: str | None = None,
 ) -> tuple[list[Document], int]:
-    """分页查询用户的文档列表"""
-    # 查询总数
+    """分页查询用户的文档列表（status 可选：completed / processing / failed，None=全部）"""
+    conditions = [Document.user_id == user_id]
+    if status:
+        # 前端的「处理中」对应 uploading + processing 两种状态
+        statuses = ["uploading", "processing"] if status == "processing" else [status]
+        conditions.append(Document.status.in_(statuses))
+
+    # 查询总数（按当前筛选条件）
     count_result = await db.execute(
-        select(func.count()).select_from(Document).where(Document.user_id == user_id)
+        select(func.count()).select_from(Document).where(*conditions)
     )
     total = count_result.scalar() or 0
 
     # 查询列表
     result = await db.execute(
         select(Document)
-        .where(Document.user_id == user_id)
-        .order_by(Document.creat_time.desc())
+        .where(*conditions)
+        # 按 id 排序：creat_time 只有秒级精度，同秒多份文档顺序不稳定会导致分页重复/遗漏
+        .order_by(Document.id.desc())
         .offset(skip)
         .limit(limit)
     )
@@ -139,10 +154,15 @@ async def delete_document(db: AsyncSession, document_id: int, user_id: int) -> N
     
     # 删除物理文件
     if doc.file_path:
-        os.remove(doc.file_path)
+        try:
+            os.remove(doc.file_path)
+        except FileNotFoundError:
+            pass  # 文件已不在（如数据卷重建过），不该阻塞删除流程
 
     # 删除向量库中对应的向量
     delete_document_vectors(user_id, doc.id)
 
     # 删除数据库记录
     await db.delete(doc)
+    # 必须显式提交：依赖清理阶段才提交的话，前端"删除成功立刻刷新"会读到旧列表
+    await db.commit()

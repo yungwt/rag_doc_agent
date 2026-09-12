@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.core.config import settings
-from app.models.base import Base
+from fastapi.staticfiles import StaticFiles
+
+from app.core.config import settings, BASE_DIR
 from app.core.database import engine
+from app.models.base import Base
 from app.api import auth
 from app.api import documents
-from app.api import qa,session
+from app.api import qa, session
+from app.api import settings as settings_api
 
 
 @asynccontextmanager
@@ -37,8 +40,14 @@ app.include_router(auth.router)
 app.include_router(documents.router)
 app.include_router(qa.router)
 app.include_router(session.router)
-
+app.include_router(settings_api.router)
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# 静态前端（Docker 构建后会存在 frontend/dist；本地裸跑 uvicorn 没构建则跳过）
+_dashboard_dir = BASE_DIR / "frontend" / "dist"
+if _dashboard_dir.exists():
+    app.mount("/", StaticFiles(directory=str(_dashboard_dir), html=True), name="spa")

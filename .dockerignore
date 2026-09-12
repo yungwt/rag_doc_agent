@@ -24,6 +24,10 @@ chroma_data
 src
 *.log
 
+# ── 前端依赖与构建产物（避免 90+MB 的 node_modules 污染镜像）──
+frontend/node_modules
+frontend/dist
+.workbuddy/
 # IDE / 系统
 .vscode
 .idea

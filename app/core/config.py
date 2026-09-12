@@ -54,10 +54,20 @@ class Settings:
     if not CHROMA_PERSIST_DIR.is_absolute():
         CHROMA_PERSIST_DIR = BASE_DIR / CHROMA_PERSIST_DIR
 
+    # ── 上传目录 ──
+    UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR / "uploads")))
+    if not UPLOAD_DIR.is_absolute():
+        UPLOAD_DIR = BASE_DIR / UPLOAD_DIR
+
     # ── 文档处理 ──
     MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", 20))
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", 500))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", 50))
+
+    # ── 检索相关性阈值（余弦相似度，0~1）──
+    # 低于该值的切片视为与问题无关而丢弃，避免无关问题挂出假的检索来源。
+    # 实测校准：相关问题 ≥0.54，无关问题 ≤0.12，0.4 位于鸿沟正中
+    RELEVANCE_MIN_SCORE: float = float(os.getenv("RELEVANCE_MIN_SCORE", 0.4))
 
     # —— 会话历史记录限制 ──
     SESSION_HISTORY_LIMIT: int = int(os.getenv("SESSION_HISTORY_LIMIT", 10))

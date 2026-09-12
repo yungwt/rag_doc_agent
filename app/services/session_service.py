@@ -9,7 +9,7 @@ from app.models.message import Message
 async def create_session(db: AsyncSession, user_id: int, title: str = "新对话") -> Session:
     session = Session(user_id=user_id, title=title)
     db.add(session)
-    await db.flush()
+    await db.commit()
     await db.refresh(session)
     return session
 
@@ -50,7 +50,7 @@ async def delete_session(db: AsyncSession, session_id: int, user_id: int):
         {"id": session_id},
     )
     await db.delete(session)
-    await db.flush()
+    await db.commit()
 
 async def save_message(
     db: AsyncSession, session_id: int, role: str, content: str, sources: list | None = None
@@ -71,7 +71,8 @@ async def get_history(db: AsyncSession, session_id: int, limit: int = 10) -> lis
     result = await db.execute(
         select(Message)
         .where(Message.session_id == session_id)
-        .order_by(Message.creat_time.desc())
+        # 按 id 排序：creat_time 只有秒级精度，同一秒内的多条消息顺序不稳定
+        .order_by(Message.id.desc())
         .limit(limit)
     )
     messages = list(result.scalars().all())

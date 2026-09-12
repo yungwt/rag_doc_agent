@@ -1,7 +1,13 @@
 # tests/test_documents.py
+import time
+from pathlib import Path
+
 import pytest
 import uuid
 import hashlib
+
+from app.core.config import settings
+
 pytestmark = pytest.mark.usefixtures("mock_embeddings_only")
 
 
@@ -31,6 +37,18 @@ def _upload_doc(client, filename="test.txt", content=b"test content", content_ty
         "/api/documents/upload",
         files={"file": (filename, content, content_type)}
     )
+
+
+def _wait_status(client, doc_id: int, timeout: float = 15.0) -> dict:
+    """轮询等待后台处理结束，返回最终文档信息（status ∈ completed/failed）"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        docs = client.get("/api/documents/").json()["documents"]
+        target = next((d for d in docs if d["id"] == doc_id), None)
+        if target and target["status"] in ("completed", "failed"):
+            return target
+        time.sleep(0.2)
+    raise TimeoutError(f"文档 {doc_id} 在 {timeout}s 内未处理完成")
 
 # ========== 上传测试 ==========
 
@@ -84,6 +102,57 @@ def test_upload_duplicate_file(client):
     resp2 = _upload_doc(client, content=content)
     assert resp2.status_code == 409
     assert "文件已存在" in resp2.json()["detail"]
+
+
+@pytest.mark.document
+def test_upload_same_content_by_different_users(client):
+    """不同用户上传相同内容的文件：各自成功，互不拦截（file_hash 按 user_id 隔离）"""
+    # 用户 A 上传
+    _, user_a, _ = _register(client)
+    _login(client, user_a)
+    content = b"shared content across users"
+    resp_a = _upload_doc(client, content=content)
+    assert resp_a.status_code == 201
+
+    # 用户 B 上传相同内容 → 应成功（修复前会撞全局唯一索引返回 409）
+    _, user_b, _ = _register(client)
+    _login(client, user_b)
+    resp_b = _upload_doc(client, content=content)
+    assert resp_b.status_code == 201
+
+    # B 自己重复传 → 仍被拦
+    resp_b2 = _upload_doc(client, content=content)
+    assert resp_b2.status_code == 409
+
+
+@pytest.mark.document
+def test_failed_document_does_not_block_reupload(client):
+    """解析失败的记录不挡重传：失败后 hash 被释放，同一文件可以再传"""
+    _, username, _ = _register(client)
+    _login(client, username)
+
+    # 伪 PDF：能通过上传校验，但解析必然失败
+    content = b"%PDF-1.4 definitely broken"
+    resp1 = _upload_doc(client, filename="broken.pdf", content=content, content_type="application/pdf")
+    assert resp1.status_code == 201
+    doc_id = resp1.json()["id"]
+
+    # 轮询等待后台解析结束（失败）
+    deadline = 20
+    status = None
+    for _ in range(deadline):
+        resp = client.get("/api/documents/")
+        rows = [d for d in resp.json()["documents"] if d["id"] == doc_id]
+        if rows and rows[0]["status"] == "failed":
+            status = "failed"
+            break
+        import time
+        time.sleep(0.5)
+    assert status == "failed", "伪 PDF 应在后台解析失败"
+
+    # 重传同一内容 → hash 已释放，应成功
+    resp2 = _upload_doc(client, filename="broken.pdf", content=content, content_type="application/pdf")
+    assert resp2.status_code == 201
 
 
 # monkeypatch:fixture，用于在测试期间临时修改对象、变量、函数等，测试结束后自动恢复原状。
@@ -412,3 +481,94 @@ def test_concurrent_upload_same_file(client):
     
     assert success_count == 1, f"期望1个成功，实际{success_count}个"
     assert conflict_count == 2, f"期望2个冲突，实际{conflict_count}个"
+
+
+# ========== 回归测试：此前发现的问题 ==========
+
+
+@pytest.mark.document
+def test_gbk_text_file_parsed(client):
+    """GBK 编码的中文 txt 应能正常解析（utf-8 → gb18030 编码回退）"""
+    _, username, _ = _register(client)
+    _login(client, username)
+
+    content = "机器学习是人工智能的一个分支，深度学习依赖神经网络结构。".encode("gbk")
+    resp = _upload_doc(client, filename="gbk_doc.txt", content=content)
+    assert resp.status_code == 201
+
+    target = _wait_status(client, resp.json()["id"])
+    assert target["status"] == "completed", f"GBK 文本应解析成功: {target.get('error_message')}"
+    assert target["chunk_count"] > 0
+
+
+@pytest.mark.document
+def test_failed_document_exposes_error_message(client):
+    """解析失败原因应落库并通过接口透传（前端红字提示的数据来源）"""
+    _, username, _ = _register(client)
+    _login(client, username)
+
+    resp = _upload_doc(client, filename="broken.pdf",
+                       content=b"%PDF-1.4 definitely broken", content_type="application/pdf")
+    assert resp.status_code == 201
+
+    target = _wait_status(client, resp.json()["id"])
+    assert target["status"] == "failed"
+    assert target.get("error_message"), "失败文档应携带 error_message"
+
+
+@pytest.mark.document
+def test_delete_document_with_missing_file(client):
+    """物理文件已丢失时删除仍应成功，不应 500 卡成删不掉的僵尸记录"""
+    _, username, _ = _register(client)
+    _login(client, username)
+
+    before = {p.name for p in Path(settings.UPLOAD_DIR).iterdir()} if Path(settings.UPLOAD_DIR).exists() else set()
+    upload_resp = _upload_doc(client, content=b"file whose disk copy will vanish")
+    doc_id = upload_resp.json()["id"]
+    target = _wait_status(client, doc_id)
+    assert target["status"] == "completed"
+
+    # 删掉这次上传产生的物理文件
+    after = {p.name for p in Path(settings.UPLOAD_DIR).iterdir()}
+    new_files = after - before
+    assert len(new_files) == 1, f"应只新增 1 个物理文件，实际 {new_files}"
+    (Path(settings.UPLOAD_DIR) / new_files.pop()).unlink()
+
+    # 文件已不在磁盘，删除接口仍应 204（只容错 FileNotFoundError）
+    resp = client.delete(f"/api/documents/{doc_id}")
+    assert resp.status_code == 204
+
+
+@pytest.mark.document
+def test_list_documents_status_filter(client):
+    """status 筛选：completed/failed 精确过滤，processing 映射 uploading+processing"""
+    _, username, _ = _register(client)
+    _login(client, username)
+
+    ids = []
+    for name, content, ctype in (
+        ("ok1.txt", b"ok content 1", "text/plain"),
+        ("ok2.txt", b"ok content 2", "text/plain"),
+        ("broken.pdf", b"%PDF-1.4 definitely broken", "application/pdf"),
+    ):
+        resp = _upload_doc(client, filename=name, content=content, content_type=ctype)
+        assert resp.status_code == 201
+        ids.append(resp.json()["id"])
+
+    for doc_id in ids:  # 等全部处理完（1 失败 2 成功），状态不再变化
+        _wait_status(client, doc_id)
+
+    completed = client.get("/api/documents/?status=completed").json()
+    assert completed["total"] == 2
+    assert all(d["status"] == "completed" for d in completed["documents"])
+
+    failed = client.get("/api/documents/?status=failed").json()
+    assert failed["total"] == 1
+    assert failed["documents"][0]["status"] == "failed"
+
+    # 都已处理完，processing（含 uploading）应为空
+    processing = client.get("/api/documents/?status=processing").json()
+    assert processing["total"] == 0
+
+    everything = client.get("/api/documents/?status=all").json()
+    assert everything["total"] == 3

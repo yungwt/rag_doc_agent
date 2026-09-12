@@ -31,13 +31,10 @@ async def register(db: AsyncSession, username: str, email: str | None, password:
         await db.refresh(user)
         await db.commit()
         return user
-    except IntegrityError as e:
+    except IntegrityError:
+        # 兜底：并发注册撞上唯一约束（正常流程已被上面的 SELECT 提前拦住）
         await db.rollback()
-        if "username" in str(e):
-            raise HTTPException(409, "用户名已存在")
-        if "email" in str(e):
-            raise HTTPException(409, "邮箱已存在")
-        raise HTTPException(500, "注册失败")
+        raise HTTPException(409, "用户名或邮箱已被占用")
 
 
 
@@ -53,3 +50,19 @@ async def login(db: AsyncSession, username: str, password: str) -> tuple[User, s
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已被禁用")
 
     return user, create_access_token(user.id), create_refresh_token(user.id)
+
+
+async def set_active(db: AsyncSession, user_id: int, active: bool) -> User:
+    """启用 / 禁用账号。
+
+    只作为 service 层函数供运维脚本调用，不暴露 HTTP 接口：当前没有角色体系
+    （User 表无 is_admin），开放管理端点等于给任何已登录用户一个提权入口。
+    禁用后该用户手上的 access / refresh 会立即失效（每请求都会重新查库校验）。
+    """
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    user.is_active = active
+    await db.commit()
+    await db.refresh(user)
+    return user
